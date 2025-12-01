@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Duplikat-Finder</title>
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="/main.js" defer></script>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Duplikat-Finder</h1>
+      <p class="subtitle">Finde und verschiebe doppelte Dateien</p>
+    </header>
+
+    <main>
+      <!-- Quellordner -->
+      <div class="input-group">
+        <label for="source-dir">OneDrive-Ordner</label>
+        <div class="input-row">
+          <input type="text" id="source-dir" placeholder="Ordner auswählen..." readonly>
+          <button id="browse-source" class="btn btn-secondary">Durchsuchen</button>
+        </div>
+      </div>
+
+      <!-- Duplikate-Ordner -->
+      <div class="input-group">
+        <label for="duplicates-dir">
+          Duplikate-Ordner <span class="optional">(optional)</span>
+        </label>
+        <div class="input-row">
+          <input type="text" id="duplicates-dir" placeholder="Standard: 'Duplikate' im Quellordner" readonly>
+          <button id="browse-duplicates" class="btn btn-secondary">Durchsuchen</button>
+        </div>
+      </div>
+
+      <!-- Optionen -->
+      <div class="options">
+        <label class="checkbox-label">
+          <input type="checkbox" id="dry-run" checked>
+          <span class="checkmark"></span>
+          Trockenlauf (zeigt nur was passieren wird)
+        </label>
+      </div>
+
+      <!-- Buttons -->
+      <div class="button-group">
+        <button id="start-btn" class="btn btn-primary">Duplikate suchen</button>
+        <button id="stop-btn" class="btn btn-danger" disabled>Abbrechen</button>
+      </div>
+
+      <!-- Fortschritt -->
+      <div class="progress-section">
+        <div class="progress-bar">
+          <div id="progress" class="progress-fill"></div>
+        </div>
+        <p id="status" class="status">Bereit</p>
+      </div>
+
+      <!-- Statistiken -->
+      <div id="stats" class="stats hidden">
+        <div class="stat-item">
+          <span class="stat-value" id="files-scanned">0</span>
+          <span class="stat-label">Dateien gescannt</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-value" id="duplicates-found">0</span>
+          <span class="stat-label">Duplikate gefunden</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-value" id="space-saved">0 MB</span>
+          <span class="stat-label">Speicherplatz</span>
+        </div>
+      </div>
+
+      <!-- Log -->
+      <div class="log-section">
+        <label>Log</label>
+        <div id="log" class="log-output"></div>
+      </div>
+    </main>
+  </div>
+</body>
+</html>
