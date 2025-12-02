@@ -9,6 +9,9 @@ on:
     branches: [main, master]
   workflow_dispatch:  # Ermöglicht manuellen Start
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
