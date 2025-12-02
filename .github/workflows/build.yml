@@ -56,19 +56,33 @@ jobs:
       - name: Build Tauri app
         run: npm run tauri build
 
+      - name: List build output (Windows)
+        if: matrix.platform == 'windows-latest'
+        run: |
+          dir src-tauri\target\release\bundle /s /b
+        shell: cmd
+
+      - name: List build output (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: find src-tauri/target/release/bundle -type f
+
       - name: Upload Windows artifact
         if: matrix.platform == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
           name: Duplikat-Finder-Windows
-          path: src-tauri/target/release/bundle/nsis/*.exe
+          path: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/msi/*.msi
 
       - name: Upload Linux artifact
         if: matrix.platform == 'ubuntu-22.04'
         uses: actions/upload-artifact@v4
         with:
           name: Duplikat-Finder-Linux
-          path: src-tauri/target/release/bundle/deb/*.deb
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/appimage/*.AppImage
 
   release:
     needs: build
