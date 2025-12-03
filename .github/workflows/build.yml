@@ -59,8 +59,9 @@ jobs:
       - name: List build output (Windows)
         if: matrix.platform == 'windows-latest'
         run: |
-          dir src-tauri\target\release\bundle /s /b
+          dir src-tauri\target\release /s /b 2>nul | findstr /i ".exe .msi"
         shell: cmd
+        continue-on-error: true
 
       - name: List build output (Linux)
         if: matrix.platform == 'ubuntu-22.04'
