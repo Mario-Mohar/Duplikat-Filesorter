@@ -48,20 +48,20 @@ window.addEventListener("DOMContentLoaded", () => {
       statusText.textContent = status;
     }
 
-    if (progress !== undefined) {
+    if (progress != null) {
       progressBar.style.width = `${progress}%`;
     }
 
-    if (files_scanned !== undefined) {
+    if (files_scanned != null) {
       filesScannedEl.textContent = files_scanned;
       statsContainer.classList.remove("hidden");
     }
 
-    if (duplicates_found !== undefined) {
+    if (duplicates_found != null) {
       duplicatesFoundEl.textContent = duplicates_found;
     }
 
-    if (space_saved !== undefined) {
+    if (space_saved != null) {
       spaceSavedEl.textContent = formatBytes(space_saved);
     }
   });
@@ -77,7 +77,7 @@ async function browseSource() {
   const selected = await open({
     directory: true,
     multiple: false,
-    title: "OneDrive-Ordner auswählen"
+    title: "Quellordner auswählen"
   });
 
   if (selected) {
@@ -101,7 +101,7 @@ async function startSearch() {
   const sourceDir = sourceDirInput.value;
 
   if (!sourceDir) {
-    addLog("Bitte wähle einen OneDrive-Ordner aus.", "error");
+    addLog("Bitte wähle einen Quellordner aus.", "error");
     return;
   }
 
