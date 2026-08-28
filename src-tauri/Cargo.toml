@@ -1,9 +1,11 @@
 [package]
 name = "duplicate-finder"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Findet doppelte Dateien per MD5-Prüfsumme und verschiebt sie, statt sie zu löschen"
+authors = ["Mario Mohar <iam@themo.at>"]
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/Mario-Mohar/Duplikat-Filesorter"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

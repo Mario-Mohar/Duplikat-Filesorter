@@ -2,6 +2,8 @@
   "name": "duplicate-finder",
   "private": true,
   "version": "0.1.0",
+  "description": "Duplikat-Finder, eine Tauri-Desktop-App zum Aufspüren doppelter Dateien",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "tauri": "tauri"
