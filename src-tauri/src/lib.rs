@@ -224,7 +224,12 @@ async fn find_duplicates(
         writeln!(log_file).ok();
     }
 
-    let mut moved_count = 0;
+    // Drei getrennte Zaehler statt einem: ein einzelner moved_count musste
+    // gleichzeitig "wuerde verschieben", "verschoben" und "gefunden" bedeuten
+    // und war dadurch in zwei von drei Faellen falsch.
+    let mut moved_count = 0;    // nur erfolgreiche echte Verschiebungen
+    let mut planned_count = 0;  // Kandidaten im Trockenlauf
+    let mut failed_count = 0;   // fehlgeschlagene Verschiebungen
     let mut space_saved: u64 = 0;
     let total_groups = duplicates.len();
 
@@ -273,6 +278,8 @@ async fn find_duplicates(
                 writeln!(log_file, "  [WÜRDE VERSCHIEBEN] {}", dup_file.display()).ok();
                 emit_log(&window, &format!("  -> Würde verschieben: {}",
                     dup_file.file_name().unwrap_or_default().to_string_lossy()), "warning");
+                planned_count += 1;
+                space_saved += file_size;
             } else {
                 // Create parent directory
                 if let Some(parent) = dest_path.parent() {
@@ -285,17 +292,17 @@ async fn find_duplicates(
                         writeln!(log_file, "    -> {}", dest_path.display()).ok();
                         emit_log(&window, &format!("  -> Verschoben: {}",
                             dup_file.file_name().unwrap_or_default().to_string_lossy()), "success");
+                        moved_count += 1;
+                        space_saved += file_size;
                     }
                     Err(e) => {
                         writeln!(log_file, "  FEHLER: {} - {}", dup_file.display(), e).ok();
                         emit_log(&window, &format!("  FEHLER: {}", e), "error");
+                        failed_count += 1;
                         continue;
                     }
                 }
             }
-
-            moved_count += 1;
-            space_saved += file_size;
         }
 
         writeln!(log_file).ok();
@@ -305,7 +312,7 @@ async fn find_duplicates(
             status: None,
             progress: Some(progress),
             files_scanned: None,
-            duplicates_found: Some(moved_count),
+            duplicates_found: Some(moved_count + planned_count),
             space_saved: Some(space_saved),
         });
     }
@@ -314,11 +321,20 @@ async fn find_duplicates(
     writeln!(log_file, "{}", "=".repeat(80)).ok();
     writeln!(log_file, "ZUSAMMENFASSUNG").ok();
     writeln!(log_file, "Duplikat-Gruppen: {}", total_groups).ok();
-    writeln!(log_file, "Dateien verschoben: {}", moved_count).ok();
+    if dry_run {
+        writeln!(log_file, "Würde verschieben: {}", planned_count).ok();
+    } else {
+        writeln!(log_file, "Dateien verschoben: {}", moved_count).ok();
+        if failed_count > 0 {
+            writeln!(log_file, "Fehlgeschlagen: {}", failed_count).ok();
+        }
+    }
     writeln!(log_file, "Speicherplatz: {:.2} MB", space_saved as f64 / (1024.0 * 1024.0)).ok();
 
     Ok(SearchResult {
-        duplicates_found: moved_count,
+        // Was gefunden wurde, nicht was bewegt wurde -- die Oberflaeche
+        // beschriftet das Feld mit "Duplikate gefunden".
+        duplicates_found: total_duplicates,
         space_saved,
         log_file: Some(log_file_path.to_string_lossy().to_string()),
     })
