@@ -1,6 +1,6 @@
 [package]
 name = "duplicate-finder"
-version = "1.1.0"
+version = "1.2.0"
 description = "Findet doppelte Dateien per MD5-Prüfsumme und verschiebt sie, statt sie zu löschen"
 authors = ["Mario Mohar <iam@themo.at>"]
 edition = "2021"
@@ -27,4 +27,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 md5 = "0.7"
 chrono = "0.4"
+rayon = "1"
 

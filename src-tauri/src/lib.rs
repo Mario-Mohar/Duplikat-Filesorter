@@ -1,9 +1,10 @@
+use rayon::prelude::*;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tauri::{Emitter, Window};
 
 // Global stop flag
@@ -62,6 +63,118 @@ fn calculate_md5(path: &Path) -> Option<String> {
     Some(format!("{:x}", context.compute()))
 }
 
+/// Ob ein Fehler bedeutet: "das ist eine andere Platte".
+///
+/// EXDEV ist 18 unter Linux und macOS; Windows meldet fuer dieselbe Lage
+/// ERROR_NOT_SAME_DEVICE (17). Nur dieser eine Fall darf auf Kopieren
+/// ausweichen -- eine fehlende Berechtigung soll weiterhin als Fehler
+/// dastehen und nicht als zweiter, ebenso aussichtsloser Versuch.
+fn is_cross_device(err: &std::io::Error) -> bool {
+    match err.raw_os_error() {
+        Some(18) => cfg!(unix),
+        Some(17) => cfg!(windows),
+        _ => false,
+    }
+}
+
+/// Kopiert in Bloecken und prueft dabei das Abbruch-Flag.
+///
+/// `fs::copy` waere kuerzer, aber bei einer 4-GB-Datei laege die letzte
+/// Abbruchpruefung dann Minuten zurueck. Und bricht die Kopie ab -- durch
+/// einen Fehler oder durch den Nutzer --, muss die halbe Zieldatei weg: sonst
+/// steht im Duplikate-Ordner eine beschaedigte Datei, die aussieht wie ein
+/// gerettetes Duplikat.
+fn copy_with_stop(src: &Path, dest: &Path) -> Result<(), String> {
+    let result = (|| -> std::io::Result<()> {
+        let mut reader = BufReader::new(File::open(src)?);
+        let mut writer = BufWriter::new(File::create(dest)?);
+        let mut buffer = vec![0u8; 65536];
+
+        loop {
+            if STOP_FLAG.load(Ordering::SeqCst) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "Abgebrochen",
+                ));
+            }
+            let bytes_read = reader.read(&mut buffer)?;
+            if bytes_read == 0 {
+                break;
+            }
+            writer.write_all(&buffer[..bytes_read])?;
+        }
+        writer.flush()?;
+
+        // Das Aenderungsdatum traegt hier Bedeutung: behalten wird die
+        // aelteste Datei jeder Gruppe. `fs::copy` uebernimmt den Zeitstempel
+        // nicht, eine Kopie saehe also juenger aus als das Original.
+        if let Ok(mtime) = fs::metadata(src).and_then(|m| m.modified()) {
+            let _ = writer.get_ref().set_modified(mtime);
+        }
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        let _ = fs::remove_file(dest);
+        return Err(e.to_string());
+    }
+    Ok(())
+}
+
+fn scan_directory(
+    dir: &Path,
+    dup_path: &Path,
+    size_groups: &mut HashMap<u64, Vec<PathBuf>>,
+    file_count: &mut usize,
+    visited: &mut HashSet<PathBuf>,
+    loops_cut: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|e| e.to_string())?;
+
+    for entry in entries.flatten() {
+        if STOP_FLAG.load(Ordering::SeqCst) {
+            return Err("Abgebrochen".to_string());
+        }
+
+        let path = entry.path();
+
+        // Skip duplicates directory
+        if path.starts_with(dup_path) {
+            continue;
+        }
+
+        if path.is_dir() {
+            // Ordner an ihrer Identitaet wiedererkennen, nicht am Pfad:
+            // `is_dir()` folgt Symlinks, und derselbe Ordner ist ueber
+            // mehrere Wege erreichbar. Ohne diese Liste schickt ein
+            // Verweis auf einen Vorfahren die Rekursion in eine Schleife,
+            // bis der Stack reisst -- und ein doppelt erreichbarer Ordner
+            // erschiene als Duplikat seiner selbst.
+            //
+            // `canonicalize` loest dafuer jeden Symlink auf. Das ist
+            // plattformunabhaengig, wo (dev, ino) es nicht waere, und
+            // fuer Verzeichnisse genauso eindeutig -- Hardlinks auf
+            // Ordner gibt es nicht.
+            let key = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if !visited.insert(key) {
+                loops_cut.push(path.clone());
+                continue;
+            }
+            let _ = scan_directory(&path, dup_path, size_groups, file_count,
+                                   visited, loops_cut);
+        } else if path.is_file() {
+            if let Ok(metadata) = fs::metadata(&path) {
+                let size = metadata.len();
+                if size > 0 {
+                    size_groups.entry(size).or_default().push(path);
+                    *file_count += 1;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn get_file_mtime(path: &Path) -> u64 {
     fs::metadata(path)
         .and_then(|m| m.modified())
@@ -75,6 +188,7 @@ async fn find_duplicates(
     source_dir: String,
     duplicates_dir: Option<String>,
     dry_run: bool,
+    hash_threads: Option<usize>,
 ) -> Result<SearchResult, String> {
     STOP_FLAG.store(false, Ordering::SeqCst);
 
@@ -109,43 +223,24 @@ async fn find_duplicates(
 
     let mut size_groups: HashMap<u64, Vec<PathBuf>> = HashMap::new();
     let mut file_count = 0;
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut loops_cut: Vec<PathBuf> = Vec::new();
 
-    fn scan_directory(
-        dir: &Path,
-        dup_path: &Path,
-        size_groups: &mut HashMap<u64, Vec<PathBuf>>,
-        file_count: &mut usize,
-    ) -> Result<(), String> {
-        let entries = fs::read_dir(dir).map_err(|e| e.to_string())?;
+    // Der Quellordner selbst gehoert vor dem ersten Abstieg auf die Liste,
+    // sonst laeuft ein Symlink, der auf ihn zurueckzeigt, eine Ebene zu weit.
+    visited.insert(fs::canonicalize(&source_path).unwrap_or_else(|_| source_path.clone()));
+    scan_directory(&source_path, &dup_path, &mut size_groups, &mut file_count,
+                   &mut visited, &mut loops_cut)?;
 
-        for entry in entries.flatten() {
-            if STOP_FLAG.load(Ordering::SeqCst) {
-                return Err("Abgebrochen".to_string());
-            }
-
-            let path = entry.path();
-
-            // Skip duplicates directory
-            if path.starts_with(dup_path) {
-                continue;
-            }
-
-            if path.is_dir() {
-                let _ = scan_directory(&path, dup_path, size_groups, file_count);
-            } else if path.is_file() {
-                if let Ok(metadata) = fs::metadata(&path) {
-                    let size = metadata.len();
-                    if size > 0 {
-                        size_groups.entry(size).or_default().push(path);
-                        *file_count += 1;
-                    }
-                }
-            }
+    // Sichtbar melden: sonst wundert man sich still ueber fehlende Treffer.
+    if !loops_cut.is_empty() {
+        emit_log(&window, &format!(
+            "{} Ordner uebersprungen, weil sie schon besucht waren (Symlink-Schleife)",
+            loops_cut.len()), "warning");
+        for path in loops_cut.iter().take(5) {
+            emit_log(&window, &format!("  uebersprungen: {}", path.display()), "info");
         }
-        Ok(())
     }
-
-    scan_directory(&source_path, &dup_path, &mut size_groups, &mut file_count)?;
 
     emit_log(&window, &format!("Gefunden: {} Dateien", file_count), "info");
     emit_progress(&window, ProgressPayload {
@@ -167,27 +262,68 @@ async fn find_duplicates(
     let total_to_hash = files_to_hash.len();
     emit_log(&window, &format!("Berechne Hashes für {} potentielle Duplikate...", total_to_hash), "info");
 
+    // Auf einer SSD ist paralleles Lesen deutlich schneller, auf einer
+    // Festplatte langsamer -- deshalb abschaltbar (hash_threads = 1) statt
+    // fest verdrahtet. Gedeckelt, weil jenseits einer Handvoll Faeden nicht
+    // mehr die CPU der Engpass ist, sondern das Laufwerk.
+    let threads = match hash_threads {
+        Some(n) if n >= 1 => n,
+        _ => std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(8),
+    };
+    if threads > 1 {
+        emit_log(&window, &format!("Hashe mit {} Faeden", threads), "info");
+    }
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .map_err(|e| format!("Konnte Hash-Faeden nicht starten: {}", e))?;
+
+    // Der Fortschritt kam aus dem Schleifenindex; parallel braucht es einen
+    // atomaren Zaehler, sonst springt die Anzeige hin und her.
+    let hashed_count = AtomicUsize::new(0);
+    let window_ref = &window;
+
+    let mut hashed: Vec<(usize, String, PathBuf)> = pool.install(|| {
+        files_to_hash
+            .par_iter()
+            .enumerate()
+            // Vor dem Hashen pruefen reicht fuer einen zuegigen Abbruch: eine
+            // einzelne Datei ist schnell durch.
+            .filter(|_| !STOP_FLAG.load(Ordering::SeqCst))
+            .filter_map(|(i, path)| {
+                let hash = calculate_md5(path);
+                let done = hashed_count.fetch_add(1, Ordering::Relaxed) + 1;
+                if done.is_multiple_of(50) || done == total_to_hash {
+                    emit_progress(window_ref, ProgressPayload {
+                        status: Some(format!("Hash: {}/{}", done, total_to_hash)),
+                        progress: Some((done as f64 / total_to_hash as f64) * 50.0),
+                        files_scanned: None,
+                        duplicates_found: None,
+                        space_saved: None,
+                    });
+                }
+                hash.map(|h| (i, h, path.clone()))
+            })
+            .collect()
+    });
+
+    if STOP_FLAG.load(Ordering::SeqCst) {
+        return Err("Abgebrochen".to_string());
+    }
+
+    // Nach dem urspruenglichen Index sortiert, bevor gruppiert wird: welche
+    // Datei behalten wird, entscheidet spaeter ohnehin die Sortierung nach
+    // mtime -- aber zwei Laeufe ueber denselben Ordner sollen dasselbe Log
+    // ergeben, und die Reihenfolge, in der Faeden fertig werden, ist beliebig.
+    hashed.sort_by_key(|entry| entry.0);
+
     let mut hash_groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
-
-    for (i, path) in files_to_hash.iter().enumerate() {
-        if STOP_FLAG.load(Ordering::SeqCst) {
-            return Err("Abgebrochen".to_string());
-        }
-
-        if let Some(hash) = calculate_md5(path) {
-            hash_groups.entry(hash).or_default().push(path.clone());
-        }
-
-        let progress = ((i + 1) as f64 / total_to_hash as f64) * 50.0;
-        if i % 50 == 0 {
-            emit_progress(&window, ProgressPayload {
-                status: Some(format!("Hash: {}/{}", i + 1, total_to_hash)),
-                progress: Some(progress),
-                files_scanned: None,
-                duplicates_found: None,
-                space_saved: None,
-            });
-        }
+    for (_, hash, path) in hashed {
+        hash_groups.entry(hash).or_default().push(path);
     }
 
     // Step 3: Filter to only actual duplicates
@@ -252,6 +388,13 @@ async fn find_duplicates(
             original.file_name().unwrap_or_default().to_string_lossy()), "info");
 
         for dup_file in dups_to_move {
+            // Auch innerhalb einer Gruppe pruefen: eine Kopie ueber
+            // Plattengrenzen kann lange dauern, und ein Abbruch soll nicht
+            // erst beim naechsten Gruppenwechsel greifen.
+            if STOP_FLAG.load(Ordering::SeqCst) {
+                break;
+            }
+
             let file_size = fs::metadata(dup_file).map(|m| m.len()).unwrap_or(0);
 
             // Create destination path
@@ -294,6 +437,45 @@ async fn find_duplicates(
                             dup_file.file_name().unwrap_or_default().to_string_lossy()), "success");
                         moved_count += 1;
                         space_saved += file_size;
+                    }
+                    // Der Duplikate-Ordner darf auf einer anderen Platte
+                    // liegen -- gerade dort ist ueblicherweise Platz, und der
+                    // Ordner ist der einzige Grund, dem Werkzeug zu trauen.
+                    // `rename` kann das nicht, also kopieren und erst nach
+                    // erfolgreicher Kopie loeschen. Nie andersherum.
+                    Err(e) if is_cross_device(&e) => {
+                        match copy_with_stop(dup_file, &dest_path) {
+                            Ok(_) => match fs::remove_file(dup_file) {
+                                Ok(_) => {
+                                    writeln!(log_file, "  Kopiert und entfernt (andere Platte): {}",
+                                        dup_file.display()).ok();
+                                    writeln!(log_file, "    -> {}", dest_path.display()).ok();
+                                    emit_log(&window, &format!("  -> Kopiert (andere Platte): {}",
+                                        dup_file.file_name().unwrap_or_default().to_string_lossy()),
+                                        "success");
+                                    moved_count += 1;
+                                    space_saved += file_size;
+                                }
+                                Err(e) => {
+                                    // Die Kopie steht, das Original liegt noch
+                                    // da: die Kopie zuruecknehmen, sonst
+                                    // existiert die Datei doppelt und der Lauf
+                                    // haette still nichts gespart.
+                                    let _ = fs::remove_file(&dest_path);
+                                    writeln!(log_file, "  FEHLER: {} - kopiert, aber nicht loeschbar: {}",
+                                        dup_file.display(), e).ok();
+                                    emit_log(&window, &format!("  FEHLER: {}", e), "error");
+                                    failed_count += 1;
+                                    continue;
+                                }
+                            },
+                            Err(msg) => {
+                                writeln!(log_file, "  FEHLER: {} - {}", dup_file.display(), msg).ok();
+                                emit_log(&window, &format!("  FEHLER: {}", msg), "error");
+                                failed_count += 1;
+                                continue;
+                            }
+                        }
                     }
                     Err(e) => {
                         writeln!(log_file, "  FEHLER: {} - {}", dup_file.display(), e).ok();
@@ -353,4 +535,109 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![find_duplicates, stop_search])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    /// Ein eigenes Verzeichnis je Test, ohne Zusatzabhaengigkeit.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dupfinder-test-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("Testordner");
+        dir
+    }
+
+    fn scan(root: &Path) -> (usize, usize) {
+        let mut groups: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+        let mut count = 0;
+        let mut visited: HashSet<PathBuf> = HashSet::new();
+        let mut cut: Vec<PathBuf> = Vec::new();
+        let nowhere = root.join("__keine_duplikate__");
+        visited.insert(fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()));
+        scan_directory(root, &nowhere, &mut groups, &mut count, &mut visited, &mut cut)
+            .expect("Scan");
+        (count, cut.len())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlink_auf_den_vorfahren_beendet_den_scan() {
+        use std::os::unix::fs::symlink;
+        let root = scratch("loop");
+        fs::create_dir(root.join("unten")).unwrap();
+        fs::write(root.join("unten/a.txt"), b"hallo").unwrap();
+        // Der klassische Fall: ein Ordner, der auf seinen eigenen Vorfahren zeigt.
+        symlink(&root, root.join("unten/zurueck")).unwrap();
+
+        let (files, cut) = scan(&root);
+        assert_eq!(files, 1, "die eine echte Datei, nicht mehrfach");
+        assert!(cut >= 1, "die Schleife muss als abgeschnitten gemeldet werden");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn zweiter_weg_auf_denselben_ordner_zaehlt_nicht_doppelt() {
+        use std::os::unix::fs::symlink;
+        let root = scratch("zweiwege");
+        fs::create_dir(root.join("echt")).unwrap();
+        fs::write(root.join("echt/a.txt"), b"inhalt").unwrap();
+        symlink(root.join("echt"), root.join("auchecht")).unwrap();
+
+        let (files, cut) = scan(&root);
+        // Ohne Merkliste stuende die Datei zweimal drin und waere ihr eigenes Duplikat.
+        assert_eq!(files, 1);
+        assert_eq!(cut, 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn kopie_uebernimmt_inhalt_und_zeitstempel() {
+        let root = scratch("kopie");
+        let src = root.join("quelle.bin");
+        let dest = root.join("ziel.bin");
+        // Groesser als der 64-KB-Puffer, damit die Schleife mehrfach laeuft.
+        let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        fs::write(&src, &payload).unwrap();
+
+        let alt = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        File::options().write(true).open(&src).unwrap().set_modified(alt).unwrap();
+
+        copy_with_stop(&src, &dest).expect("Kopie");
+        assert_eq!(fs::read(&dest).unwrap(), payload);
+
+        let src_m = fs::metadata(&src).unwrap().modified().unwrap();
+        let dest_m = fs::metadata(&dest).unwrap().modified().unwrap();
+        assert_eq!(src_m, dest_m, "die aelteste Datei zu behalten haengt am mtime");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn abbruch_waehrend_der_kopie_laesst_keine_halbe_datei_zurueck() {
+        let root = scratch("abbruch");
+        let src = root.join("quelle.bin");
+        let dest = root.join("ziel.bin");
+        fs::write(&src, vec![7u8; 500_000]).unwrap();
+
+        STOP_FLAG.store(true, Ordering::SeqCst);
+        let result = copy_with_stop(&src, &dest);
+        STOP_FLAG.store(false, Ordering::SeqCst);
+
+        assert!(result.is_err(), "ein Abbruch muss als Fehler zurueckkommen");
+        assert!(!dest.exists(), "die halbe Zieldatei muss weg sein");
+        assert!(src.exists(), "das Original wird nie vor der Kopie angefasst");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn nur_exdev_weicht_auf_kopieren_aus() {
+        let exdev = std::io::Error::from_raw_os_error(if cfg!(windows) { 17 } else { 18 });
+        assert!(is_cross_device(&exdev));
+        // Eine fehlende Berechtigung soll ein Fehler bleiben, kein zweiter Versuch.
+        assert!(!is_cross_device(&std::io::Error::from_raw_os_error(13)));
+        assert!(!is_cross_device(&std::io::Error::other("kein OS-Fehler")));
+    }
 }

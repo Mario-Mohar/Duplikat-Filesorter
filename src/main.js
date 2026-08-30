@@ -6,6 +6,7 @@ const { open } = window.__TAURI__.dialog;
 let sourceDirInput;
 let duplicatesDirInput;
 let dryRunCheckbox;
+let parallelHashCheckbox;
 let startBtn;
 let stopBtn;
 let progressBar;
@@ -24,6 +25,7 @@ window.addEventListener("DOMContentLoaded", () => {
   sourceDirInput = document.getElementById("source-dir");
   duplicatesDirInput = document.getElementById("duplicates-dir");
   dryRunCheckbox = document.getElementById("dry-run");
+  parallelHashCheckbox = document.getElementById("parallel-hash");
   startBtn = document.getElementById("start-btn");
   stopBtn = document.getElementById("stop-btn");
   progressBar = document.getElementById("progress");
@@ -118,6 +120,9 @@ async function startSearch() {
 
   const dryRun = dryRunCheckbox.checked;
   const duplicatesDir = duplicatesDirInput.value || null;
+  // null heisst "so viele Faeden wie sinnvoll", 1 heisst der Reihe nach --
+  // auf einer Festplatte macht paralleles Lesen die Sache langsamer.
+  const hashThreads = parallelHashCheckbox.checked ? null : 1;
 
   addLog(`Starte Suche in: ${sourceDir}`, "info");
   if (dryRun) {
@@ -128,7 +133,8 @@ async function startSearch() {
     const result = await invoke("find_duplicates", {
       sourceDir,
       duplicatesDir,
-      dryRun
+      dryRun,
+      hashThreads
     });
 
     addLog("", "info");
