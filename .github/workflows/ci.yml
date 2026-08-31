@@ -99,8 +99,10 @@ jobs:
           cat pr-report/report.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload report
+        # No working-directory here: it is only valid on `run` steps, and a
+        # `uses` step ignores defaults.run and already starts at the repository
+        # root, which is where pr-report/ was written.
         if: always() && github.event_name == 'pull_request'
-        working-directory: .
         uses: actions/upload-artifact@v4
         with:
           name: pr-report
