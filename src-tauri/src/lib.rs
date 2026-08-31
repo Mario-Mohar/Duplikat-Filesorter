@@ -771,6 +771,90 @@ mod tests {
     }
 
     #[test]
+    fn md5_stimmt_mit_dem_bekannten_wert_ueberein() {
+        // Der Standardwert aus RFC 1321. Faellt er, rechnet nicht diese
+        // Anwendung falsch, sondern die Hash-Bibliothek darunter wurde
+        // ausgetauscht -- und dann sind alle frueher gemeldeten Duplikate
+        // hinfaellig.
+        let root = scratch("md5");
+        let datei = root.join("abc.txt");
+        fs::write(&datei, b"abc").unwrap();
+
+        assert_eq!(
+            calculate_md5(&datei).unwrap(),
+            "900150983cd24fb0d6963f7d28e17f72"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn md5_einer_leeren_datei() {
+        let root = scratch("md5leer");
+        let datei = root.join("leer.txt");
+        fs::write(&datei, b"").unwrap();
+
+        assert_eq!(
+            calculate_md5(&datei).unwrap(),
+            "d41d8cd98f00b204e9800998ecf8427e"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn md5_liest_ueber_den_puffer_hinaus() {
+        // Der Lesepuffer ist 8 KB. Wer die Schleife falsch schreibt, hasht nur
+        // den ersten Block -- und dann gilt jede Datei mit gleichem Anfang als
+        // Duplikat, egal wie sie weitergeht.
+        let root = scratch("md5gross");
+        let a = root.join("a.bin");
+        let b = root.join("b.bin");
+        let mut inhalt_a = vec![0u8; 100_000];
+        let mut inhalt_b = inhalt_a.clone();
+        inhalt_a[99_999] = 1;
+        inhalt_b[99_999] = 2;
+        fs::write(&a, &inhalt_a).unwrap();
+        fs::write(&b, &inhalt_b).unwrap();
+
+        assert_ne!(
+            calculate_md5(&a).unwrap(),
+            calculate_md5(&b).unwrap(),
+            "zwei Dateien, die sich erst im letzten Byte unterscheiden"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn md5_einer_fehlenden_datei_ist_none() {
+        // Wichtig, weil None den Aufrufer die Datei ueberspringen laesst.
+        // Ein Platzhalterwert waere ein Hash, den zwei nicht lesbare Dateien
+        // teilen -- und sie damit zu Duplikaten voneinander machen wuerde.
+        let root = scratch("md5fehlt");
+        assert!(calculate_md5(&root.join("gibtsnicht.txt")).is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mtime_einer_fehlenden_datei_ist_null() {
+        // 0 ist der aelteste moegliche Zeitstempel. Eine Datei, deren mtime
+        // nicht lesbar ist, gilt damit als die aelteste und wird behalten --
+        // die sichere Richtung, weil Behalten nie Daten verliert.
+        let root = scratch("mtime");
+        assert_eq!(get_file_mtime(&root.join("gibtsnicht.txt")), 0);
+
+        let datei = root.join("da.txt");
+        fs::write(&datei, b"x").unwrap();
+        let alt = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        File::options()
+            .write(true)
+            .open(&datei)
+            .unwrap()
+            .set_modified(alt)
+            .unwrap();
+        assert_eq!(get_file_mtime(&datei), 1_000_000_000);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn nur_exdev_weicht_auf_kopieren_aus() {
         let exdev = std::io::Error::from_raw_os_error(if cfg!(windows) { 17 } else { 18 });
         assert!(is_cross_device(&exdev));
