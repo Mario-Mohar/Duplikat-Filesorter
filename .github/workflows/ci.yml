@@ -1,0 +1,120 @@
+name: CI
+
+# Checks the Rust core on every push and pull request, forks included. Read
+# access only: a fork's token is read-only anyway, and a workflow that compiles
+# and runs contributed code has no business holding a write one. Posting the
+# result is a separate workflow, pr-report.yml, which runs from the default
+# branch and never executes any of this.
+#
+# This is not the release build. build.yml still produces the Windows and Linux
+# bundles; the point here is to be fast enough to be useful on a pull request.
+
+on:
+  # Only the default branch on push. A branch with an open pull request would
+  # otherwise be checked twice for every commit -- once as a push and once as a
+  # pull request -- which doubles the minutes and puts two identically named
+  # status checks on the same commit.
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: src-tauri
+
+jobs:
+  check:
+    name: Checks
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Tauri's system dependencies
+        # The crate links against webkit2gtk, so even `cargo test` needs these.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: taiki-e/install-action@nextest
+
+      - name: Formatting
+        id: fmt
+        continue-on-error: true
+        run: cargo fmt --check
+
+      - name: Clippy
+        id: clippy
+        continue-on-error: true
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        id: tests
+        continue-on-error: true
+        # nextest is here for one reason: cargo test cannot write JUnit, and
+        # JUnit is the one report format every project in this account emits.
+        run: cargo nextest run --profile ci
+
+      - name: Build report
+        id: report
+        if: always()
+        working-directory: .
+        env:
+          FMT: ${{ steps.fmt.outcome }}
+          CLIPPY: ${{ steps.clippy.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+        run: |
+          mark() { if [ "$1" = success ]; then echo "✅"; else echo "❌"; fi; }
+          tests_line="$(python3 .github/scripts/junit_summary.py src-tauri/target/nextest/ci/junit.xml)"
+
+          mkdir -p pr-report
+          {
+            echo "| Check | | Detail |"
+            echo "| --- | :-: | --- |"
+            echo "| Formatting | $(mark "$FMT") | cargo fmt --check |"
+            echo "| Lint | $(mark "$CLIPPY") | cargo clippy, warnings are errors |"
+            echo "| Tests | $(mark "$TESTS") | ${tests_line} |"
+          } > pr-report/report.md
+
+          overall=success
+          for outcome in "$FMT" "$CLIPPY" "$TESTS"; do
+            [ "$outcome" = success ] || overall=failure
+          done
+          echo "$overall" > pr-report/status.txt
+          echo "overall=$overall" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            echo "${{ github.event.pull_request.number }}" > pr-report/pr-number.txt
+          fi
+          cat pr-report/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        # No working-directory here: it is only valid on `run` steps, and a
+        # `uses` step ignores defaults.run and already starts at the repository
+        # root, which is where pr-report/ was written.
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-report
+          path: pr-report/
+          retention-days: 3
+
+      - name: Fail if a check failed
+        if: always() && steps.report.outputs.overall != 'success'
+        run: |
+          echo "One or more checks failed; the table is in the job summary."
+          exit 1

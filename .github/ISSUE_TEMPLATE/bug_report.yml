@@ -1,0 +1,36 @@
+name: Bug report
+description: Something behaves differently than it should
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: shape
+    attributes:
+      label: What the folder looked like
+      description: "Paths if you can share them. If not, the shape is usually enough: a symlink, a mount point, two different filesystems, an unreadable file, very large files."
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: ["Linux", "Windows", "macOS"]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: The log from the application window
+      render: shell

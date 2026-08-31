@@ -1,0 +1,5 @@
+# The "ci" profile writes a JUnit report, which is what the pipeline reads to
+# put a test count into the pull request comment. Locally, `cargo nextest run`
+# uses the default profile and writes nothing.
+[profile.ci.junit]
+path = "junit.xml"
