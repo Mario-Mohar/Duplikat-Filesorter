@@ -160,8 +160,7 @@ fn scan_directory(
                 loops_cut.push(path.clone());
                 continue;
             }
-            let _ = scan_directory(&path, dup_path, size_groups, file_count,
-                                   visited, loops_cut);
+            let _ = scan_directory(&path, dup_path, size_groups, file_count, visited, loops_cut);
         } else if path.is_file() {
             if let Ok(metadata) = fs::metadata(&path) {
                 let size = metadata.len();
@@ -178,7 +177,11 @@ fn scan_directory(
 fn get_file_mtime(path: &Path) -> u64 {
     fs::metadata(path)
         .and_then(|m| m.modified())
-        .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
+        .map(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        })
         .unwrap_or(0)
 }
 
@@ -207,19 +210,30 @@ async fn find_duplicates(
     if !dry_run && !dup_path.exists() {
         fs::create_dir_all(&dup_path)
             .map_err(|e| format!("Konnte Duplikate-Ordner nicht erstellen: {}", e))?;
-        emit_log(&window, &format!("Duplikate-Ordner erstellt: {}", dup_path.display()), "success");
+        emit_log(
+            &window,
+            &format!("Duplikate-Ordner erstellt: {}", dup_path.display()),
+            "success",
+        );
     } else if dup_path.exists() {
-        emit_log(&window, &format!("Duplikate-Ordner: {}", dup_path.display()), "info");
+        emit_log(
+            &window,
+            &format!("Duplikate-Ordner: {}", dup_path.display()),
+            "info",
+        );
     }
 
     // Step 1: Scan files and group by size
-    emit_progress(&window, ProgressPayload {
-        status: Some("Scanne Dateien...".to_string()),
-        progress: Some(0.0),
-        files_scanned: None,
-        duplicates_found: None,
-        space_saved: None,
-    });
+    emit_progress(
+        &window,
+        ProgressPayload {
+            status: Some("Scanne Dateien...".to_string()),
+            progress: Some(0.0),
+            files_scanned: None,
+            duplicates_found: None,
+            space_saved: None,
+        },
+    );
 
     let mut size_groups: HashMap<u64, Vec<PathBuf>> = HashMap::new();
     let mut file_count = 0;
@@ -229,27 +243,49 @@ async fn find_duplicates(
     // Der Quellordner selbst gehoert vor dem ersten Abstieg auf die Liste,
     // sonst laeuft ein Symlink, der auf ihn zurueckzeigt, eine Ebene zu weit.
     visited.insert(fs::canonicalize(&source_path).unwrap_or_else(|_| source_path.clone()));
-    scan_directory(&source_path, &dup_path, &mut size_groups, &mut file_count,
-                   &mut visited, &mut loops_cut)?;
+    scan_directory(
+        &source_path,
+        &dup_path,
+        &mut size_groups,
+        &mut file_count,
+        &mut visited,
+        &mut loops_cut,
+    )?;
 
     // Sichtbar melden: sonst wundert man sich still ueber fehlende Treffer.
     if !loops_cut.is_empty() {
-        emit_log(&window, &format!(
-            "{} Ordner uebersprungen, weil sie schon besucht waren (Symlink-Schleife)",
-            loops_cut.len()), "warning");
+        emit_log(
+            &window,
+            &format!(
+                "{} Ordner uebersprungen, weil sie schon besucht waren (Symlink-Schleife)",
+                loops_cut.len()
+            ),
+            "warning",
+        );
         for path in loops_cut.iter().take(5) {
-            emit_log(&window, &format!("  uebersprungen: {}", path.display()), "info");
+            emit_log(
+                &window,
+                &format!("  uebersprungen: {}", path.display()),
+                "info",
+            );
         }
     }
 
-    emit_log(&window, &format!("Gefunden: {} Dateien", file_count), "info");
-    emit_progress(&window, ProgressPayload {
-        status: None,
-        progress: None,
-        files_scanned: Some(file_count),
-        duplicates_found: None,
-        space_saved: None,
-    });
+    emit_log(
+        &window,
+        &format!("Gefunden: {} Dateien", file_count),
+        "info",
+    );
+    emit_progress(
+        &window,
+        ProgressPayload {
+            status: None,
+            progress: None,
+            files_scanned: Some(file_count),
+            duplicates_found: None,
+            space_saved: None,
+        },
+    );
 
     // Step 2: Calculate hashes for potential duplicates
     let files_to_hash: Vec<PathBuf> = size_groups
@@ -260,7 +296,14 @@ async fn find_duplicates(
         .collect();
 
     let total_to_hash = files_to_hash.len();
-    emit_log(&window, &format!("Berechne Hashes für {} potentielle Duplikate...", total_to_hash), "info");
+    emit_log(
+        &window,
+        &format!(
+            "Berechne Hashes für {} potentielle Duplikate...",
+            total_to_hash
+        ),
+        "info",
+    );
 
     // Auf einer SSD ist paralleles Lesen deutlich schneller, auf einer
     // Festplatte langsamer -- deshalb abschaltbar (hash_threads = 1) statt
@@ -298,13 +341,16 @@ async fn find_duplicates(
                 let hash = calculate_md5(path);
                 let done = hashed_count.fetch_add(1, Ordering::Relaxed) + 1;
                 if done.is_multiple_of(50) || done == total_to_hash {
-                    emit_progress(window_ref, ProgressPayload {
-                        status: Some(format!("Hash: {}/{}", done, total_to_hash)),
-                        progress: Some((done as f64 / total_to_hash as f64) * 50.0),
-                        files_scanned: None,
-                        duplicates_found: None,
-                        space_saved: None,
-                    });
+                    emit_progress(
+                        window_ref,
+                        ProgressPayload {
+                            status: Some(format!("Hash: {}/{}", done, total_to_hash)),
+                            progress: Some((done as f64 / total_to_hash as f64) * 50.0),
+                            files_scanned: None,
+                            duplicates_found: None,
+                            space_saved: None,
+                        },
+                    );
                 }
                 hash.map(|h| (i, h, path.clone()))
             })
@@ -342,7 +388,15 @@ async fn find_duplicates(
     }
 
     let total_duplicates: usize = duplicates.values().map(|files| files.len() - 1).sum();
-    emit_log(&window, &format!("Gefunden: {} Gruppen mit {} Duplikaten", duplicates.len(), total_duplicates), "highlight");
+    emit_log(
+        &window,
+        &format!(
+            "Gefunden: {} Gruppen mit {} Duplikaten",
+            duplicates.len(),
+            total_duplicates
+        ),
+        "highlight",
+    );
 
     // Step 4: Create log file and move duplicates
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
@@ -351,21 +405,30 @@ async fn find_duplicates(
     let mut log_file = File::create(&log_file_path)
         .map_err(|e| format!("Konnte Logdatei nicht erstellen: {}", e))?;
 
-    writeln!(log_file, "Duplikat-Finder Log - {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")).ok();
+    writeln!(
+        log_file,
+        "Duplikat-Finder Log - {}",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    )
+    .ok();
     writeln!(log_file, "{}", "=".repeat(80)).ok();
     writeln!(log_file).ok();
 
     if dry_run {
-        writeln!(log_file, "*** TROCKENLAUF - Keine Dateien wurden verschoben ***").ok();
+        writeln!(
+            log_file,
+            "*** TROCKENLAUF - Keine Dateien wurden verschoben ***"
+        )
+        .ok();
         writeln!(log_file).ok();
     }
 
     // Drei getrennte Zaehler statt einem: ein einzelner moved_count musste
     // gleichzeitig "wuerde verschieben", "verschoben" und "gefunden" bedeuten
     // und war dadurch in zwei von drei Faellen falsch.
-    let mut moved_count = 0;    // nur erfolgreiche echte Verschiebungen
-    let mut planned_count = 0;  // Kandidaten im Trockenlauf
-    let mut failed_count = 0;   // fehlgeschlagene Verschiebungen
+    let mut moved_count = 0; // nur erfolgreiche echte Verschiebungen
+    let mut planned_count = 0; // Kandidaten im Trockenlauf
+    let mut failed_count = 0; // fehlgeschlagene Verschiebungen
     let mut space_saved: u64 = 0;
     let total_groups = duplicates.len();
 
@@ -384,8 +447,16 @@ async fn find_duplicates(
         writeln!(log_file, "Hash: {}", hash).ok();
         writeln!(log_file, "  Original: {}", original.display()).ok();
 
-        emit_log(&window, &format!("Gruppe {}/{}: {}", idx + 1, total_groups,
-            original.file_name().unwrap_or_default().to_string_lossy()), "info");
+        emit_log(
+            &window,
+            &format!(
+                "Gruppe {}/{}: {}",
+                idx + 1,
+                total_groups,
+                original.file_name().unwrap_or_default().to_string_lossy()
+            ),
+            "info",
+        );
 
         for dup_file in dups_to_move {
             // Auch innerhalb einer Gruppe pruefen: eine Kopie ueber
@@ -403,8 +474,15 @@ async fn find_duplicates(
 
             // Handle name conflicts
             if dest_path.exists() {
-                let stem = dest_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-                let ext = dest_path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+                let stem = dest_path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                let ext = dest_path
+                    .extension()
+                    .map(|e| format!(".{}", e.to_string_lossy()))
+                    .unwrap_or_default();
                 let parent = dest_path.parent().unwrap_or(&dup_path).to_path_buf();
 
                 let mut counter = 1;
@@ -419,8 +497,14 @@ async fn find_duplicates(
 
             if dry_run {
                 writeln!(log_file, "  [WÜRDE VERSCHIEBEN] {}", dup_file.display()).ok();
-                emit_log(&window, &format!("  -> Würde verschieben: {}",
-                    dup_file.file_name().unwrap_or_default().to_string_lossy()), "warning");
+                emit_log(
+                    &window,
+                    &format!(
+                        "  -> Würde verschieben: {}",
+                        dup_file.file_name().unwrap_or_default().to_string_lossy()
+                    ),
+                    "warning",
+                );
                 planned_count += 1;
                 space_saved += file_size;
             } else {
@@ -433,8 +517,14 @@ async fn find_duplicates(
                     Ok(_) => {
                         writeln!(log_file, "  Verschoben: {}", dup_file.display()).ok();
                         writeln!(log_file, "    -> {}", dest_path.display()).ok();
-                        emit_log(&window, &format!("  -> Verschoben: {}",
-                            dup_file.file_name().unwrap_or_default().to_string_lossy()), "success");
+                        emit_log(
+                            &window,
+                            &format!(
+                                "  -> Verschoben: {}",
+                                dup_file.file_name().unwrap_or_default().to_string_lossy()
+                            ),
+                            "success",
+                        );
                         moved_count += 1;
                         space_saved += file_size;
                     }
@@ -447,12 +537,24 @@ async fn find_duplicates(
                         match copy_with_stop(dup_file, &dest_path) {
                             Ok(_) => match fs::remove_file(dup_file) {
                                 Ok(_) => {
-                                    writeln!(log_file, "  Kopiert und entfernt (andere Platte): {}",
-                                        dup_file.display()).ok();
+                                    writeln!(
+                                        log_file,
+                                        "  Kopiert und entfernt (andere Platte): {}",
+                                        dup_file.display()
+                                    )
+                                    .ok();
                                     writeln!(log_file, "    -> {}", dest_path.display()).ok();
-                                    emit_log(&window, &format!("  -> Kopiert (andere Platte): {}",
-                                        dup_file.file_name().unwrap_or_default().to_string_lossy()),
-                                        "success");
+                                    emit_log(
+                                        &window,
+                                        &format!(
+                                            "  -> Kopiert (andere Platte): {}",
+                                            dup_file
+                                                .file_name()
+                                                .unwrap_or_default()
+                                                .to_string_lossy()
+                                        ),
+                                        "success",
+                                    );
                                     moved_count += 1;
                                     space_saved += file_size;
                                 }
@@ -462,15 +564,21 @@ async fn find_duplicates(
                                     // existiert die Datei doppelt und der Lauf
                                     // haette still nichts gespart.
                                     let _ = fs::remove_file(&dest_path);
-                                    writeln!(log_file, "  FEHLER: {} - kopiert, aber nicht loeschbar: {}",
-                                        dup_file.display(), e).ok();
+                                    writeln!(
+                                        log_file,
+                                        "  FEHLER: {} - kopiert, aber nicht loeschbar: {}",
+                                        dup_file.display(),
+                                        e
+                                    )
+                                    .ok();
                                     emit_log(&window, &format!("  FEHLER: {}", e), "error");
                                     failed_count += 1;
                                     continue;
                                 }
                             },
                             Err(msg) => {
-                                writeln!(log_file, "  FEHLER: {} - {}", dup_file.display(), msg).ok();
+                                writeln!(log_file, "  FEHLER: {} - {}", dup_file.display(), msg)
+                                    .ok();
                                 emit_log(&window, &format!("  FEHLER: {}", msg), "error");
                                 failed_count += 1;
                                 continue;
@@ -490,13 +598,16 @@ async fn find_duplicates(
         writeln!(log_file).ok();
 
         let progress = 50.0 + ((idx + 1) as f64 / total_groups as f64) * 50.0;
-        emit_progress(&window, ProgressPayload {
-            status: None,
-            progress: Some(progress),
-            files_scanned: None,
-            duplicates_found: Some(moved_count + planned_count),
-            space_saved: Some(space_saved),
-        });
+        emit_progress(
+            &window,
+            ProgressPayload {
+                status: None,
+                progress: Some(progress),
+                files_scanned: None,
+                duplicates_found: Some(moved_count + planned_count),
+                space_saved: Some(space_saved),
+            },
+        );
     }
 
     // Write summary
@@ -511,7 +622,12 @@ async fn find_duplicates(
             writeln!(log_file, "Fehlgeschlagen: {}", failed_count).ok();
         }
     }
-    writeln!(log_file, "Speicherplatz: {:.2} MB", space_saved as f64 / (1024.0 * 1024.0)).ok();
+    writeln!(
+        log_file,
+        "Speicherplatz: {:.2} MB",
+        space_saved as f64 / (1024.0 * 1024.0)
+    )
+    .ok();
 
     Ok(SearchResult {
         // Was gefunden wurde, nicht was bewegt wurde -- die Oberflaeche
@@ -544,7 +660,8 @@ mod tests {
 
     /// Ein eigenes Verzeichnis je Test, ohne Zusatzabhaengigkeit.
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("dupfinder-test-{}-{}", name, std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("dupfinder-test-{}-{}", name, std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("Testordner");
         dir
@@ -557,8 +674,15 @@ mod tests {
         let mut cut: Vec<PathBuf> = Vec::new();
         let nowhere = root.join("__keine_duplikate__");
         visited.insert(fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()));
-        scan_directory(root, &nowhere, &mut groups, &mut count, &mut visited, &mut cut)
-            .expect("Scan");
+        scan_directory(
+            root,
+            &nowhere,
+            &mut groups,
+            &mut count,
+            &mut visited,
+            &mut cut,
+        )
+        .expect("Scan");
         (count, cut.len())
     }
 
@@ -574,7 +698,10 @@ mod tests {
 
         let (files, cut) = scan(&root);
         assert_eq!(files, 1, "die eine echte Datei, nicht mehrfach");
-        assert!(cut >= 1, "die Schleife muss als abgeschnitten gemeldet werden");
+        assert!(
+            cut >= 1,
+            "die Schleife muss als abgeschnitten gemeldet werden"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -604,14 +731,22 @@ mod tests {
         fs::write(&src, &payload).unwrap();
 
         let alt = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
-        File::options().write(true).open(&src).unwrap().set_modified(alt).unwrap();
+        File::options()
+            .write(true)
+            .open(&src)
+            .unwrap()
+            .set_modified(alt)
+            .unwrap();
 
         copy_with_stop(&src, &dest).expect("Kopie");
         assert_eq!(fs::read(&dest).unwrap(), payload);
 
         let src_m = fs::metadata(&src).unwrap().modified().unwrap();
         let dest_m = fs::metadata(&dest).unwrap().modified().unwrap();
-        assert_eq!(src_m, dest_m, "die aelteste Datei zu behalten haengt am mtime");
+        assert_eq!(
+            src_m, dest_m,
+            "die aelteste Datei zu behalten haengt am mtime"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -628,7 +763,10 @@ mod tests {
 
         assert!(result.is_err(), "ein Abbruch muss als Fehler zurueckkommen");
         assert!(!dest.exists(), "die halbe Zieldatei muss weg sein");
-        assert!(src.exists(), "das Original wird nie vor der Kopie angefasst");
+        assert!(
+            src.exists(),
+            "das Original wird nie vor der Kopie angefasst"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
