@@ -84,3 +84,13 @@ Rust im Backend, Vanilla HTML, CSS und JavaScript im Frontend, kein Framework un
 ## Lizenz
 
 MIT, siehe [LICENSE](LICENSE).
+
+## Mitarbeit
+
+Fehlerberichte, Funktionswünsche und Pull Requests sind willkommen — etwas zu
+finden, das nicht stimmt, und es aufzuschreiben ist ein echter Beitrag, und der
+nützlichste dazu.
+
+Die Einzelheiten stehen in **[CONTRIBUTING.md](CONTRIBUTING.md)**: was eine
+Meldung brauchbar macht, wie eine Korrektur über einen Fork zu dir kommt, und
+was nach dem Absenden passiert.
