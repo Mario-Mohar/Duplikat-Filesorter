@@ -34,7 +34,7 @@ jobs:
     name: Checks
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Tauri's system dependencies
         # The crate links against webkit2gtk, so even `cargo test` needs these.
@@ -107,7 +107,7 @@ jobs:
         # `uses` step ignores defaults.run and already starts at the repository
         # root, which is where pr-report/ was written.
         if: always() && github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pr-report
           path: pr-report/
