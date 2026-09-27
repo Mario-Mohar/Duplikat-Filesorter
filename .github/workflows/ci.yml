@@ -32,7 +32,15 @@ defaults:
 jobs:
   check:
     name: Checks
-    runs-on: ubuntu-22.04
+    # Bis 2026-09-27 stand hier ubuntu-22.04. Das Bild ist seit dem 17.09.2026
+    # abgekuendigt (runner-images#14254): ab Maerz 2027 gibt es Brownouts, an
+    # denen Laeufe absichtlich scheitern, und am 17.04.2027 ist es weg.
+    #
+    # Hier laufen nur Pruefungen, kein Artefakt verlaesst den Runner, also darf
+    # es das jeweils neueste Bild sein. Die Tauri-Abhaengigkeiten unten sind auf
+    # Ubuntu 24.04 und 26.04 nachgewiesen vorhanden (gemessen am 2026-09-27,
+    # libwebkit2gtk-4.1-dev 2.52.6 auf 26.04).
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
