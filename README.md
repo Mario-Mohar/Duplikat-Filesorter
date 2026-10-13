@@ -74,7 +74,8 @@ npm run tauri build    # Pakete nach src-tauri/target/release/bundle/
 
 - **MD5 ist bewusst gewählt**, weil es schnell ist. Für normales Aufräumen reicht das. Wer sich gegen absichtlich konstruierte Kollisionen absichern muss, braucht ein anderes Werkzeug.
 - **Der Duplikate-Ordner darf auf einer anderen Platte liegen.** Verschoben wird per `rename`, das ist sofort fertig; nur wenn das Ziel auf einem anderen Dateisystem liegt, wird kopiert und das Original erst nach erfolgreicher Kopie gelöscht. Das Log vermerkt, welcher Weg genommen wurde.
-- **Ein Symlink auf einen Ordner, der schon besucht wurde, wird übersprungen** und im Log gemeldet. Dateien hinter einem Symlink werden also einmal gefunden, nicht mehrfach und nicht endlos.
+- **Symlinks werden nie verfolgt und nie verschoben**, weder auf Dateien noch auf Ordner. Das Log meldet, wie viele übersprungen wurden. So landet nie die echte Datei im Duplikate-Ordner, während der Link stehen bleibt, und nichts außerhalb des gewählten Ordners wird angefasst.
+- **Was sich nicht lesen lässt, meldet das Log als Warnung** (Ordner oder Dateien ohne Leserecht). Die stehen dann nicht im Ergebnis, „Keine Duplikate gefunden“ gilt also nur für den lesbaren Teil.
 - Die Oberfläche ist auf Deutsch.
 
 ## Technik

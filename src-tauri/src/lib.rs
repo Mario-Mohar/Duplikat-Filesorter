@@ -121,21 +121,46 @@ fn copy_with_stop(src: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn scan_directory(
-    dir: &Path,
-    dup_path: &Path,
-    size_groups: &mut HashMap<u64, Vec<PathBuf>>,
-    file_count: &mut usize,
-    visited: &mut HashSet<PathBuf>,
-    loops_cut: &mut Vec<PathBuf>,
-) -> Result<(), String> {
-    let entries = fs::read_dir(dir).map_err(|e| e.to_string())?;
+/// Was ein Scan einsammelt. Die Listen landen hinterher als Warnung im Log,
+/// damit nichts still fehlt.
+#[derive(Default)]
+struct ScanState {
+    size_groups: HashMap<u64, Vec<PathBuf>>,
+    file_count: usize,
+    visited: HashSet<PathBuf>,
+    /// Ordner, die ueber einen zweiten Weg schon besucht waren.
+    loops_cut: Vec<PathBuf>,
+    /// Symlinks, ob auf Dateien oder Ordner. Sie werden nie verfolgt: ueber
+    /// einen Link auf eine Datei wanderte sonst die echte Datei in den
+    /// Duplikate-Ordner und nur der Link blieb zurueck (#16), ueber einen Link
+    /// auf einen Ordner wurden Dateien ausserhalb des Quellordners verschoben
+    /// (#17).
+    links: Vec<PathBuf>,
+    /// Ordner und Dateien, die sich nicht lesen liessen (#18).
+    unreadable: Vec<PathBuf>,
+}
 
-    for entry in entries.flatten() {
+fn scan_directory(dir: &Path, dup_path: &Path, state: &mut ScanState) -> Result<(), String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => {
+            state.unreadable.push(dir.to_path_buf());
+            return Ok(());
+        }
+    };
+
+    for entry in entries {
         if STOP_FLAG.load(Ordering::SeqCst) {
             return Err("Abgebrochen".to_string());
         }
 
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                state.unreadable.push(dir.to_path_buf());
+                continue;
+            }
+        };
         let path = entry.path();
 
         // Skip duplicates directory
@@ -143,35 +168,59 @@ fn scan_directory(
             continue;
         }
 
-        if path.is_dir() {
-            // Ordner an ihrer Identitaet wiedererkennen, nicht am Pfad:
-            // `is_dir()` folgt Symlinks, und derselbe Ordner ist ueber
-            // mehrere Wege erreichbar. Ohne diese Liste schickt ein
-            // Verweis auf einen Vorfahren die Rekursion in eine Schleife,
-            // bis der Stack reisst -- und ein doppelt erreichbarer Ordner
-            // erschiene als Duplikat seiner selbst.
-            //
-            // `canonicalize` loest dafuer jeden Symlink auf. Das ist
-            // plattformunabhaengig, wo (dev, ino) es nicht waere, und
-            // fuer Verzeichnisse genauso eindeutig -- Hardlinks auf
-            // Ordner gibt es nicht.
-            let key = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-            if !visited.insert(key) {
-                loops_cut.push(path.clone());
+        // `file_type()` folgt Symlinks nicht, anders als `is_dir()` und
+        // `is_file()`.
+        let file_type = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => {
+                state.unreadable.push(path);
                 continue;
             }
-            let _ = scan_directory(&path, dup_path, size_groups, file_count, visited, loops_cut);
-        } else if path.is_file() {
-            if let Ok(metadata) = fs::metadata(&path) {
-                let size = metadata.len();
-                if size > 0 {
-                    size_groups.entry(size).or_default().push(path);
-                    *file_count += 1;
+        };
+
+        if file_type.is_symlink() {
+            state.links.push(path);
+        } else if file_type.is_dir() {
+            // Ordner an ihrer Identitaet wiedererkennen, nicht am Pfad. Seit
+            // Symlinks nicht mehr verfolgt werden, greift das nur noch bei
+            // Bind-Mounts und Aehnlichem, bleibt aber als Schutz vor einer
+            // endlosen Rekursion.
+            let key = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if !state.visited.insert(key) {
+                state.loops_cut.push(path.clone());
+                continue;
+            }
+            scan_directory(&path, dup_path, state)?;
+        } else if file_type.is_file() {
+            match entry.metadata() {
+                Ok(metadata) => {
+                    let size = metadata.len();
+                    if size > 0 {
+                        state.size_groups.entry(size).or_default().push(path);
+                        state.file_count += 1;
+                    }
                 }
+                Err(_) => state.unreadable.push(path),
             }
         }
     }
     Ok(())
+}
+
+/// Meldet eine Liste uebersprungener Pfade: Zaehler als Warnung, die ersten
+/// fuenf als Beispiel.
+fn emit_skipped(window: &Window, paths: &[PathBuf], what: &str) {
+    if paths.is_empty() {
+        return;
+    }
+    emit_log(window, &format!("{} {}", paths.len(), what), "warning");
+    for path in paths.iter().take(5) {
+        emit_log(
+            window,
+            &format!("  uebersprungen: {}", path.display()),
+            "info",
+        );
+    }
 }
 
 fn get_file_mtime(path: &Path) -> u64 {
@@ -235,41 +284,35 @@ async fn find_duplicates(
         },
     );
 
-    let mut size_groups: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-    let mut file_count = 0;
-    let mut visited: HashSet<PathBuf> = HashSet::new();
-    let mut loops_cut: Vec<PathBuf> = Vec::new();
+    let mut state = ScanState::default();
 
-    // Der Quellordner selbst gehoert vor dem ersten Abstieg auf die Liste,
-    // sonst laeuft ein Symlink, der auf ihn zurueckzeigt, eine Ebene zu weit.
-    visited.insert(fs::canonicalize(&source_path).unwrap_or_else(|_| source_path.clone()));
-    scan_directory(
-        &source_path,
-        &dup_path,
-        &mut size_groups,
-        &mut file_count,
-        &mut visited,
-        &mut loops_cut,
-    )?;
+    // Der Quellordner selbst gehoert vor dem ersten Abstieg auf die Liste.
+    state
+        .visited
+        .insert(fs::canonicalize(&source_path).unwrap_or_else(|_| source_path.clone()));
+    scan_directory(&source_path, &dup_path, &mut state)?;
 
     // Sichtbar melden: sonst wundert man sich still ueber fehlende Treffer.
-    if !loops_cut.is_empty() {
-        emit_log(
-            &window,
-            &format!(
-                "{} Ordner uebersprungen, weil sie schon besucht waren (Symlink-Schleife)",
-                loops_cut.len()
-            ),
-            "warning",
-        );
-        for path in loops_cut.iter().take(5) {
-            emit_log(
-                &window,
-                &format!("  uebersprungen: {}", path.display()),
-                "info",
-            );
-        }
-    }
+    emit_skipped(
+        &window,
+        &state.loops_cut,
+        "Ordner uebersprungen, weil sie schon besucht waren",
+    );
+    emit_skipped(
+        &window,
+        &state.links,
+        "Symlinks uebersprungen (werden nie verfolgt oder verschoben)",
+    );
+    emit_skipped(
+        &window,
+        &state.unreadable,
+        "Ordner oder Dateien nicht lesbar, nicht geprueft",
+    );
+    let ScanState {
+        size_groups,
+        file_count,
+        ..
+    } = state;
 
     emit_log(
         &window,
@@ -328,6 +371,9 @@ async fn find_duplicates(
     // Der Fortschritt kam aus dem Schleifenindex; parallel braucht es einen
     // atomaren Zaehler, sonst springt die Anzeige hin und her.
     let hashed_count = AtomicUsize::new(0);
+    // Dateien, die sich zwar auflisten, aber nicht lesen liessen (chmod 000).
+    // Frueher fielen sie still aus dem Vergleich (#18).
+    let hash_failed: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
     let window_ref = &window;
 
     let mut hashed: Vec<(usize, String, PathBuf)> = pool.install(|| {
@@ -352,6 +398,11 @@ async fn find_duplicates(
                         },
                     );
                 }
+                if hash.is_none() {
+                    if let Ok(mut failed) = hash_failed.lock() {
+                        failed.push(path.clone());
+                    }
+                }
                 hash.map(|h| (i, h, path.clone()))
             })
             .collect()
@@ -360,6 +411,14 @@ async fn find_duplicates(
     if STOP_FLAG.load(Ordering::SeqCst) {
         return Err("Abgebrochen".to_string());
     }
+
+    let mut hash_failed = hash_failed.into_inner().unwrap_or_default();
+    hash_failed.sort();
+    emit_skipped(
+        &window,
+        &hash_failed,
+        "Dateien nicht lesbar, nicht verglichen",
+    );
 
     // Nach dem urspruenglichen Index sortiert, bevor gruppiert wird: welche
     // Datei behalten wird, entscheidet spaeter ohnehin die Sortierung nach
@@ -667,23 +726,14 @@ mod tests {
         dir
     }
 
-    fn scan(root: &Path) -> (usize, usize) {
-        let mut groups: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-        let mut count = 0;
-        let mut visited: HashSet<PathBuf> = HashSet::new();
-        let mut cut: Vec<PathBuf> = Vec::new();
+    fn scan(root: &Path) -> ScanState {
+        let mut state = ScanState::default();
         let nowhere = root.join("__keine_duplikate__");
-        visited.insert(fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()));
-        scan_directory(
-            root,
-            &nowhere,
-            &mut groups,
-            &mut count,
-            &mut visited,
-            &mut cut,
-        )
-        .expect("Scan");
-        (count, cut.len())
+        state
+            .visited
+            .insert(fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()));
+        scan_directory(root, &nowhere, &mut state).expect("Scan");
+        state
     }
 
     #[test]
@@ -696,11 +746,12 @@ mod tests {
         // Der klassische Fall: ein Ordner, der auf seinen eigenen Vorfahren zeigt.
         symlink(&root, root.join("unten/zurueck")).unwrap();
 
-        let (files, cut) = scan(&root);
-        assert_eq!(files, 1, "die eine echte Datei, nicht mehrfach");
-        assert!(
-            cut >= 1,
-            "die Schleife muss als abgeschnitten gemeldet werden"
+        let state = scan(&root);
+        assert_eq!(state.file_count, 1, "die eine echte Datei, nicht mehrfach");
+        assert_eq!(
+            state.links.len(),
+            1,
+            "der Link wird gemeldet, nicht verfolgt"
         );
         let _ = fs::remove_dir_all(&root);
     }
@@ -714,10 +765,74 @@ mod tests {
         fs::write(root.join("echt/a.txt"), b"inhalt").unwrap();
         symlink(root.join("echt"), root.join("auchecht")).unwrap();
 
-        let (files, cut) = scan(&root);
-        // Ohne Merkliste stuende die Datei zweimal drin und waere ihr eigenes Duplikat.
-        assert_eq!(files, 1);
-        assert_eq!(cut, 1);
+        let state = scan(&root);
+        // Sonst stuende die Datei zweimal drin und waere ihr eigenes Duplikat.
+        assert_eq!(state.file_count, 1);
+        assert_eq!(state.links.len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlink_auf_eine_datei_ist_kein_duplikat() {
+        // #16: Datei und Link darauf galten als Duplikate, verschoben wurde die
+        // echte Datei.
+        use std::os::unix::fs::symlink;
+        let root = scratch("dateilink");
+        fs::write(root.join("a.txt"), b"inhalt").unwrap();
+        symlink("a.txt", root.join("link_a.txt")).unwrap();
+
+        let state = scan(&root);
+        assert_eq!(state.file_count, 1);
+        let gruppe = state.size_groups.get(&6).expect("a.txt");
+        assert_eq!(gruppe, &vec![root.join("a.txt")]);
+        assert_eq!(state.links, vec![root.join("link_a.txt")]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ordnerlink_nach_aussen_wird_nicht_durchsucht() {
+        // #17: Dateien hinter einem Link auf einen fremden Ordner wurden
+        // gefunden und von dort weg verschoben.
+        use std::os::unix::fs::symlink;
+        let basis = scratch("aussen");
+        let quelle = basis.join("src");
+        let aussen = basis.join("aussen");
+        fs::create_dir_all(&quelle).unwrap();
+        fs::create_dir_all(&aussen).unwrap();
+        fs::write(quelle.join("a.txt"), b"gleich").unwrap();
+        fs::write(aussen.join("a.txt"), b"gleich").unwrap();
+        symlink("../aussen", quelle.join("link")).unwrap();
+
+        let state = scan(&quelle);
+        assert_eq!(state.file_count, 1, "nur die Datei im Quellordner");
+        assert!(state
+            .size_groups
+            .values()
+            .flatten()
+            .all(|p| p.starts_with(&quelle) && !p.starts_with(quelle.join("link"))));
+        let _ = fs::remove_dir_all(&basis);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn nicht_lesbarer_ordner_wird_gemeldet() {
+        // #18: der Ordner fehlte ohne jeden Hinweis.
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("gesperrt");
+        let zu = root.join("zu");
+        fs::create_dir(&zu).unwrap();
+        fs::write(zu.join("a.txt"), b"x").unwrap();
+        fs::set_permissions(&zu, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let lesbar = fs::read_dir(&zu).is_ok(); // als root kommt man trotzdem rein
+        let state = scan(&root);
+        fs::set_permissions(&zu, fs::Permissions::from_mode(0o755)).unwrap();
+        if !lesbar {
+            assert_eq!(state.unreadable, vec![zu.clone()]);
+            assert_eq!(state.file_count, 0);
+        }
         let _ = fs::remove_dir_all(&root);
     }
 
